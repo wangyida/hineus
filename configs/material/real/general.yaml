@@ -1,0 +1,48 @@
+object: the_object_name
+name: ${object}_shape
+
+####network#####
+network: material
+database_type: real
+database_name: ${object}/raw_1024
+mesh: data/meshes/${object}_shape-300000.ply
+
+reg_diffuse_light: true
+reg_diffuse_light_lambda: 0.1
+reg_mat: true
+shader_cfg:
+  diffuse_sample_num: 512
+  specular_sample_num: 256
+  outer_light_version: direction # sphere_direction
+  light_exp_max: 5.0
+  inner_light_exp_max: 5.0
+  human_lights: false # true
+
+######loss######
+loss: ['nerf_render','mat_reg']
+val_metric: ['mat_render']
+key_metric_name: psnr
+
+####dataset#####
+train_dataset_type: dummy
+dataset_dir: your_dataset_dir
+train_dataset_cfg:
+  database_name: ${object}/raw_1024
+val_set_list:
+  -
+    name: val
+    type: dummy
+    cfg:
+      database_type: ${database_type}
+      database_name: ${object}/raw_1024
+
+####trainier####
+optimizer_type: adam
+lr_type: warm_up_cos
+lr_cfg:
+  end_warm: 1000
+  end_iter: 100000
+total_step: 100000
+val_interval: 5000
+save_interval: 500
+train_log_step: 10
