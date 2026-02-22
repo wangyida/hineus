@@ -1,7 +1,15 @@
+"""
+COLMAP Wrapper for Structure from Motion
+
+This module provides a high-level interface to run COLMAP pipeline including
+feature extraction, matching, sparse reconstruction, and dense reconstruction.
+"""
+
 import argparse
-import subprocess
 import os
+import subprocess
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 from skimage.io import imread
@@ -10,10 +18,21 @@ from colmap.database import COLMAPDatabase
 from colmap.read_write_model import CAMERA_MODEL_NAMES
 
 
-def run_sfm(image_dir,
-            project_dir,
-            same_camera=False,
-            colmap_path='$HOME/code/colmap/build/src/exe/colmap'):
+def run_sfm(
+    image_dir: str,
+    project_dir: str,
+    same_camera: bool = False,
+    colmap_path: str = "$HOME/code/colmap/build/src/exe/colmap"
+) -> None:
+    """
+    Run complete COLMAP Structure from Motion pipeline.
+
+    Args:
+        image_dir: Path to directory containing images
+        project_dir: Output directory for COLMAP project
+        same_camera: If True, use same camera for all images
+        colmap_path: Path to COLMAP executable
+    """
     Path(project_dir).mkdir(exist_ok=True, parents=True)
     # create database for all images
     db = COLMAPDatabase.connect(f'{project_dir}/database.db')

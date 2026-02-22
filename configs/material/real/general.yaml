@@ -1,5 +1,5 @@
 object: the_object_name
-name: ${object}_shape
+name: ${object}_material
 
 ####network#####
 network: material
@@ -13,10 +13,10 @@ reg_mat: true
 shader_cfg:
   diffuse_sample_num: 512
   specular_sample_num: 256
-  outer_light_version: direction # sphere_direction
+  outer_light_version: sphere_direction
   light_exp_max: 5.0
   inner_light_exp_max: 5.0
-  human_lights: false # true
+  human_lights: true
 
 ######loss######
 loss: ['nerf_render','mat_reg']

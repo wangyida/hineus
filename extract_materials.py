@@ -1,5 +1,12 @@
+"""
+Material Extraction Script
+
+Extracts material properties (albedo, metallic, roughness) from trained neural network.
+"""
+
 import argparse
 from pathlib import Path
+from typing import Dict, Any
 
 import numpy as np
 import torch
@@ -9,7 +16,8 @@ from utils.base_utils import load_cfg
 from utils.raw_utils import linear_to_srgb
 
 
-def main():
+def main() -> None:
+    """Main material extraction function."""
     cfg = load_cfg(flags.cfg)
     network = NeROMaterialRenderer(cfg, False)
 
@@ -30,12 +38,9 @@ def main():
             'it seems blender will apply an inverse gamma correction so that the results will be incorrect without this gamma correct\n'
             'for more information refer to https://blender.stackexchange.com/questions/87576/vertex-colors-loose-color-data/87583#87583'
         )
-        np.save(f'{material_dir}/metallic.npy',
-                linear_to_srgb(materials['metallic']))
-        np.save(f'{material_dir}/roughness.npy',
-                linear_to_srgb(materials['roughness']))
-        np.save(f'{material_dir}/albedo.npy',
-                linear_to_srgb(materials['albedo']))
+        np.save(f'{material_dir}/metallic.npy', linear_to_srgb(materials['metallic']))
+        np.save(f'{material_dir}/roughness.npy', linear_to_srgb(materials['roughness']))
+        np.save(f'{material_dir}/albedo.npy', linear_to_srgb(materials['albedo']))
 
 
 if __name__ == "__main__":

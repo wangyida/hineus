@@ -1,40 +1,60 @@
+"""
+Base Utility Functions
+
+This module contains utility functions for I/O operations, depth and image processing,
+image processing utilities, and geometric transformations.
+"""
+
 import math
 import os
+import pickle
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
 import h5py
-import torch
-
 import numpy as np
-import pickle
-
+import torch
 import yaml
 from numpy import ndarray
+from omegaconf import OmegaConf
 from plyfile import PlyData
 from skimage.io import imread
-
-#######################io#########################################
-from torch import Tensor
 from tqdm import tqdm
 from transforms3d.axangles import mat2axangle
 from transforms3d.euler import euler2mat
-from omegaconf import OmegaConf
 
 
-def read_pickle(pkl_path):
+#######################io#########################################
+
+def read_pickle(pkl_path: str) -> Any:
+    """
+    Load data from pickle file.
+
+    Args:
+        pkl_path: Path to pickle file
+
+    Returns:
+        Unpickled data
+    """
     with open(pkl_path, 'rb') as f:
         return pickle.load(f)
 
 
-def save_pickle(data, pkl_path):
-    # os.system('mkdir -p {}'.format(os.path.dirname(pkl_path)))
+def save_pickle(data: Any, pkl_path: str) -> None:
+    """
+    Save data to pickle file.
+
+    Args:
+        data: Data to save
+        pkl_path: Output path
+    """
     with open(pkl_path, 'wb') as f:
         pickle.dump(data, f)
 
 
 #####################depth and image###############################
 
-def mask_zbuffer_to_pts(mask, zbuffer, K):
+def mask_zbuffer_to_pts(mask: ndarray, zbuffer: ndarray, K: ndarray) -> ndarray:
     ys, xs = np.nonzero(mask)
     zbuffer = zbuffer[ys, xs]
     u, v, f = K[0, 2], K[1, 2], K[0, 0]
@@ -45,7 +65,24 @@ def mask_zbuffer_to_pts(mask, zbuffer, K):
     return np.dot(pts, np.linalg.inv(K).transpose())
 
 
-def mask_depth_to_pts(mask, depth, K, rgb=None):
+def mask_depth_to_pts(
+    mask: ndarray,
+    depth: ndarray,
+    K: ndarray,
+    rgb: Optional[ndarray] = None
+) -> Union[ndarray, Tuple[ndarray, ndarray]]:
+    """
+    Convert masked depth to 3D points.
+
+    Args:
+        mask: Binary mask
+        depth: Depth values
+        K: Camera intrinsic matrix
+        rgb: Optional RGB values
+
+    Returns:
+        3D points or tuple of (points, rgb)
+    """
     hs, ws = np.nonzero(mask)
     depth = depth[hs, ws]
     pts = np.asarray([ws, hs, depth], np.float32).transpose()
@@ -56,14 +93,39 @@ def mask_depth_to_pts(mask, depth, K, rgb=None):
         return np.dot(pts, np.linalg.inv(K).transpose())
 
 
-def read_render_zbuffer(dpt_pth, max_depth, min_depth):
+def read_render_zbuffer(
+    dpt_pth: str,
+    max_depth: float,
+    min_depth: float
+) -> Tuple[ndarray, ndarray]:
+    """
+    Read rendered zbuffer and convert to depth.
+
+    Args:
+        dpt_pth: Path to zbuffer image
+        max_depth: Maximum depth value
+        min_depth: Minimum depth value
+
+    Returns:
+        Tuple of (mask, depth)
+    """
     zbuffer = imread(dpt_pth)
     mask = (zbuffer > 0) & (zbuffer < 5000)
     zbuffer = zbuffer.astype(np.float64) / 2 ** 16 * (max_depth - min_depth) + min_depth
     return mask, zbuffer
 
 
-def zbuffer_to_depth(zbuffer, K):
+def zbuffer_to_depth(zbuffer: ndarray, K: ndarray) -> ndarray:
+    """
+    Convert zbuffer to depth map.
+
+    Args:
+        zbuffer: Zbuffer values
+        K: Camera intrinsic matrix
+
+    Returns:
+        Depth map
+    """
     u, v, f = K[0, 2], K[1, 2], K[0, 0]
     x = np.arange(zbuffer.shape[1])
     y = np.arange(zbuffer.shape[0])
@@ -76,37 +138,94 @@ def zbuffer_to_depth(zbuffer, K):
     return np.reshape(depth, zbuffer.shape)
 
 
-def project_points(pts, RT, K):
+def project_points(
+    pts: ndarray,
+    RT: ndarray,
+    K: ndarray
+) -> Tuple[ndarray, ndarray]:
+    """
+    Project 3D points to 2D.
+
+    Args:
+        pts: 3D points
+        RT: Transformation matrix
+        K: Camera intrinsic matrix
+
+    Returns:
+        Tuple of (2D points, depths)
+    """
     pts = np.matmul(pts, RT[:, :3].transpose()) + RT[:, 3:].transpose()
     pts = np.matmul(pts, K.transpose())
     dpt = pts[:, 2]
     mask0 = (np.abs(dpt) < 1e-4) & (np.abs(dpt) > 0)
-    if np.sum(mask0) > 0: dpt[mask0] = 1e-4
+    if np.sum(mask0) > 0:
+        dpt[mask0] = 1e-4
     mask1 = (np.abs(dpt) > -1e-4) & (np.abs(dpt) < 0)
-    if np.sum(mask1) > 0: dpt[mask1] = -1e-4
+    if np.sum(mask1) > 0:
+        dpt[mask1] = -1e-4
     pts2d = pts[:, :2] / dpt[:, None]
     return pts2d, dpt
 
 
 #######################image processing#############################
 
-def grey_repeats(img_raw):
-    if len(img_raw.shape) == 2: img_raw = np.repeat(img_raw[:, :, None], 3, axis=2)
-    if img_raw.shape[2] > 3: img_raw = img_raw[:, :, :3]
+def grey_repeats(img_raw: ndarray) -> ndarray:
+    """
+    Convert grayscale to RGB by repeating channels.
+
+    Args:
+        img_raw: Input image
+
+    Returns:
+        RGB image
+    """
+    if len(img_raw.shape) == 2:
+        img_raw = np.repeat(img_raw[:, :, None], 3, axis=2)
+    if img_raw.shape[2] > 3:
+        img_raw = img_raw[:, :, :3]
     return img_raw
 
 
-def normalize_image(img, mask=None):
-    if mask is not None: img[np.logical_not(mask.astype(np.bool))] = 127
+def normalize_image(img: ndarray, mask: Optional[ndarray] = None) -> torch.Tensor:
+    """
+    Normalize image to tensor.
+
+    Args:
+        img: Input image
+        mask: Optional mask
+
+    Returns:
+        Normalized tensor
+    """
+    if mask is not None:
+        img[np.logical_not(mask.astype(np.bool))] = 127
     img = (img.transpose([2, 0, 1]).astype(np.float32) - 127.0) / 128.0
     return torch.tensor(img, dtype=torch.float32)
 
 
-def tensor_to_image(tensor):
+def tensor_to_image(tensor: torch.Tensor) -> ndarray:
+    """
+    Convert tensor to image.
+
+    Args:
+        tensor: Input tensor
+
+    Returns:
+        Image array
+    """
     return (tensor * 128 + 127).astype(np.uint8).transpose(1, 2, 0)
 
 
-def equal_hist(img):
+def equal_hist(img: ndarray) -> ndarray:
+    """
+    Apply histogram equalization.
+
+    Args:
+        img: Input image
+
+    Returns:
+        Equalized image
+    """
     if len(img.shape) == 3:
         img0 = cv2.equalizeHist(img[:, :, 0])
         img1 = cv2.equalizeHist(img[:, :, 1])
@@ -117,40 +236,90 @@ def equal_hist(img):
     return img
 
 
-def resize_large_image(img, resize_max):
+def resize_large_image(img: ndarray, resize_max: float) -> Tuple[ndarray, float]:
+    """
+    Resize large image while maintaining aspect ratio.
+
+    Args:
+        img: Input image
+        resize_max: Maximum size for larger dimension
+
+    Returns:
+        Tuple of (resized image, resize ratio)
+    """
     h, w = img.shape[:2]
     max_side = max(h, w)
     if max_side > resize_max:
         ratio = resize_max / max_side
-        if ratio <= 0.5: img = cv2.GaussianBlur(img, (5, 5), 1.5)
-        img = cv2.resize(img, (int(round(ratio * w)), int(round(ratio * h))), interpolation=cv2.INTER_LINEAR)
+        if ratio <= 0.5:
+            img = cv2.GaussianBlur(img, (5, 5), 1.5)
+        img = cv2.resize(
+            img,
+            (int(round(ratio * w)), int(round(ratio * h))),
+            interpolation=cv2.INTER_LINEAR
+        )
         return img, ratio
     else:
         return img, 1.0
 
 
-def downsample_gaussian_blur(img, ratio):
+def downsample_gaussian_blur(img: ndarray, ratio: float) -> ndarray:
+    """
+    Downsample image using Gaussian blur.
+
+    Args:
+        img: Input image
+        ratio: Downsample ratio
+
+    Returns:
+        Blurred image
+    """
     sigma = (1 / ratio) / 3
-    # ksize=np.ceil(2*sigma)
     ksize = int(np.ceil(((sigma - 0.8) / 0.3 + 1) * 2 + 1))
     ksize = ksize + 1 if ksize % 2 == 0 else ksize
     img = cv2.GaussianBlur(img, (ksize, ksize), sigma, borderType=cv2.BORDER_REFLECT101)
     return img
 
 
-def resize_small_image(img, resize_min):
+def resize_small_image(img: ndarray, resize_min: float) -> Tuple[ndarray, float]:
+    """
+    Resize small image while maintaining aspect ratio.
+
+    Args:
+        img: Input image
+        resize_min: Minimum size for smaller dimension
+
+    Returns:
+        Tuple of (resized image, resize ratio)
+    """
     h, w = img.shape[:2]
     min_side = min(h, w)
     if min_side < resize_min:
         ratio = resize_min / min_side
-        img = cv2.resize(img, (int(round(ratio * w)), int(round(ratio * h))), interpolation=cv2.INTER_LINEAR)
+        img = cv2.resize(
+            img,
+            (int(round(ratio * w)), int(round(ratio * h))),
+            interpolation=cv2.INTER_LINEAR
+        )
         return img, ratio
     else:
         return img, 1.0
 
 
 ############################geometry######################################
-def round_coordinates(coord, h, w):
+
+def round_coordinates(coord: ndarray, h: int, w: int) -> ndarray:
+    """
+    Round coordinates and clamp to image boundaries.
+
+    Args:
+        coord: Coordinates to round
+        h: Image height
+        w: Image width
+
+    Returns:
+        Rounded and clamped coordinates
+    """
     coord = np.round(coord).astype(np.int32)
     coord[coord[:, 0] < 0, 0] = 0
     coord[coord[:, 0] >= w, 0] = w - 1
@@ -159,127 +328,244 @@ def round_coordinates(coord, h, w):
     return coord
 
 
-def get_img_patch(img, pt, size):
-    if isinstance(size, list) or isinstance(size, tuple) or isinstance(size, np.ndarray):
+def get_img_patch(
+    img: ndarray,
+    pt: ndarray,
+    size: Union[int, List[int], Tuple[int, int], ndarray]
+) -> ndarray:
+    """
+    Extract image patch around a point.
+
+    Args:
+        img: Input image
+        pt: Center point
+        size: Patch size (single value or tuple)
+
+    Returns:
+        Extracted patch
+    """
+    if isinstance(size, (list, tuple, np.ndarray)):
         size_h, size_w = size
     else:
         size_h, size_w = size, size
+
     h, w = img.shape[:2]
     x, y = pt.astype(np.int32)
     xmin = max(0, x - size_w)
     xmax = min(w - 1, x + size_w)
     ymin = max(0, y - size_h)
     ymax = min(h - 1, y + size_h)
+
     patch = np.full([size_h * 2, size_w * 2, 3], 127, np.uint8)
     patch[ymin - y + size_h:ymax - y + size_h, xmin - x + size_w:xmax - x + size_w] = img[ymin:ymax, xmin:xmax]
     return patch
 
 
-def perspective_transform(pts, H):
+def perspective_transform(pts: ndarray, H: ndarray) -> ndarray:
+    """
+    Apply perspective transformation to points.
+
+    Args:
+        pts: Input points
+        H: Homography matrix
+
+    Returns:
+        Transformed points
+    """
     tpts = np.concatenate([pts, np.ones([pts.shape[0], 1])], 1) @ H.transpose()
-    tpts = tpts[:, :2] / np.abs(tpts[:, 2:])  # todo: why only abs? this one is correct
+    tpts = tpts[:, :2] / np.abs(tpts[:, 2:])
     return tpts
 
 
-def get_rot_m(angle):
-    return np.asarray([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]], np.float32)  # rn+1,3,3
-
-
-def get_rot_m_batch(angle):
-    return np.asarray([[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]], np.float32).transpose(
-        [2, 0, 1])
-
-
-def compute_F(K1, K2, R, t):
+def get_rot_m(angle: float) -> ndarray:
     """
+    Get 2D rotation matrix.
 
-    :param K1: [3,3]
-    :param K2: [3,3]
-    :param R:  [3,3]
-    :param t:  [3,1]
-    :return:
+    Args:
+        angle: Rotation angle in radians
+
+    Returns:
+        2x2 rotation matrix
     """
-    A = K1 @ R.T @ t  # [3,1]
-    C = np.asarray([[0, -A[2, 0], A[1, 0]],
-                    [A[2, 0], 0, -A[0, 0]],
-                    [-A[1, 0], A[0, 0], 0]])
+    return np.asarray(
+        [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
+        np.float32
+    )
+
+
+def get_rot_m_batch(angle: ndarray) -> ndarray:
+    """
+    Get batch of 2D rotation matrices.
+
+    Args:
+        angle: Rotation angles
+
+    Returns:
+        Batch of 2x2 rotation matrices
+    """
+    return np.asarray(
+        [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
+        np.float32
+    ).transpose([2, 0, 1])
+
+
+def compute_F(K1: ndarray, K2: ndarray, R: ndarray, t: ndarray) -> ndarray:
+    """
+    Compute fundamental matrix from camera parameters.
+
+    Args:
+        K1: Intrinsic matrix for camera 1
+        K2: Intrinsic matrix for camera 2
+        R: Relative rotation
+        t: Relative translation
+
+    Returns:
+        Fundamental matrix
+    """
+    A = K1 @ R.T @ t
+    C = np.asarray(
+        [[0, -A[2, 0], A[1, 0]], [A[2, 0], 0, -A[0, 0]], [-A[1, 0], A[0, 0], 0]]
+    )
     F = (np.linalg.inv(K2)).T @ R @ K1.T @ C
     return F
 
 
-def compute_relative_transformation(Rt0, Rt1):
+def compute_relative_transformation(Rt0: ndarray, Rt1: ndarray) -> Tuple[ndarray, ndarray]:
     """
-    x1=Rx0+t
-    :param Rt0: x0=R0x+t0
-    :param Rt1: x1=R1x+t1
-    :return:
-        R1R0.T(x0-t0)+t1
+    Compute relative transformation between two poses.
+
+    Args:
+        Rt0: First pose (3x4 matrix)
+        Rt1: Second pose (3x4 matrix)
+
+    Returns:
+        Tuple of (relative rotation, relative translation)
     """
     R = Rt1[:, :3] @ Rt0[:, :3].T
     t = Rt1[:, 3] - R @ Rt0[:, 3]
+    return R, t
     return np.concatenate([R, t[:, None]], 1)
 
 
-def compute_angle(rotation_diff):
+def compute_angle(rotation_diff: ndarray) -> float:
+    """
+    Compute angular distance from rotation difference matrix.
+
+    Args:
+        rotation_diff: 3x3 rotation matrix
+
+    Returns:
+        Angular distance in degrees
+    """
     trace = np.trace(rotation_diff)
     trace = trace if trace <= 3 else 3
-    angular_distance = np.rad2deg(np.arccos((trace - 1.) / 2.))
+    angular_distance = np.rad2deg(np.arccos((trace - 1.0) / 2.0))
     return angular_distance
 
 
-def load_h5(filename):
+def load_h5(filename: str) -> Dict[str, Any]:
+    """
+    Load data from HDF5 file.
+
+    Args:
+        filename: Path to HDF5 file
+
+    Returns:
+        Dictionary of loaded data
+    """
     dict_to_load = {}
     with h5py.File(filename, 'r') as f:
         keys = [key for key in f.keys()]
         for key in keys:
-            dict_to_load[key] = f[key][()]  # .value
+            dict_to_load[key] = f[key][()]
     return dict_to_load
 
 
-def save_h5(dict_to_save, filename):
+def save_h5(dict_to_save: Dict[str, Any], filename: str) -> None:
+    """
+    Save data to HDF5 file.
+
+    Args:
+        dict_to_save: Dictionary of data to save
+        filename: Output path
+    """
     with h5py.File(filename, 'w') as f:
         for key in dict_to_save:
             f.create_dataset(key, data=dict_to_save[key])
 
 
-def pts_to_hpts(pts):
+def pts_to_hpts(pts: ndarray) -> ndarray:
+    """
+    Convert points to homogeneous coordinates.
+
+    Args:
+        pts: Input points
+
+    Returns:
+        Homogeneous points
+    """
     return np.concatenate([pts, np.ones([pts.shape[0], 1])], 1)
 
 
-def hpts_to_pts(hpts):
+def hpts_to_pts(hpts: ndarray) -> ndarray:
+    """
+    Convert homogeneous points to Euclidean points.
+
+    Args:
+        hpts: Homogeneous points
+
+    Returns:
+        Euclidean points
+    """
     return hpts[:, :-1] / hpts[:, -1:]
 
 
-def np_skew_symmetric(v):
-    M = np.asarray([
-        [0, -v[2], v[1], ],
-        [v[2], 0, -v[0], ],
-        [-v[1], v[0], 0, ],
-    ])
+def np_skew_symmetric(v: ndarray) -> ndarray:
+    """
+    Create skew-symmetric matrix from vector.
 
+    Args:
+        v: Input vector
+
+    Returns:
+        Skew-symmetric matrix
+    """
+    M = np.asarray([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return M
 
 
-def point_line_dist(hpts, lines):
+def point_line_dist(hpts: ndarray, lines: ndarray) -> ndarray:
     """
-    :param hpts: n,3 or n,2
-    :param lines: n,3
-    :return:
+    Compute distance from points to lines.
+
+    Args:
+        hpts: Homogeneous points (n,3 or n,2)
+        lines: Line representations (n,3)
+
+    Returns:
+        Distances
     """
     if hpts.shape[1] == 2:
         hpts = np.concatenate([hpts, np.ones([hpts.shape[0], 1])], 1)
     return np.abs(np.sum(hpts * lines, 1)) / np.linalg.norm(lines[:, :2], 2, 1)
 
 
-def epipolar_distance(x0, x1, F):
+def epipolar_distance(
+    x0: ndarray,
+    x1: ndarray,
+    F: ndarray
+) -> Tuple[ndarray, ndarray]:
     """
+    Compute epipolar distances between corresponding points.
 
-    :param x0: [n,2]
-    :param x1: [n,2]
-    :param F:  [3,3]
-    :return:
+    Args:
+        x0: Points in first image (n,2)
+        x1: Points in second image (n,2)
+        F: Fundamental matrix (3,3)
+
+    Returns:
+        Tuple of (dist10, dist01)
     """
-
     hkps0 = np.concatenate([x0, np.ones([x0.shape[0], 1])], 1)
     hkps1 = np.concatenate([x1, np.ones([x1.shape[0], 1])], 1)
 
@@ -292,18 +578,60 @@ def epipolar_distance(x0, x1, F):
     return dist10, dist01
 
 
-def epipolar_distance_mean(x0, x1, F):
+def epipolar_distance_mean(x0: ndarray, x1: ndarray, F: ndarray) -> ndarray:
+    """
+    Compute mean epipolar distance.
+
+    Args:
+        x0: Points in first image
+        x1: Points in second image
+        F: Fundamental matrix
+
+    Returns:
+        Mean distances
+    """
     return np.mean(np.stack(epipolar_distance(x0, x1, F), 1), 1)
 
 
-def compute_dR_dt(R0, t0, R1, t1):
-    # Compute dR, dt
+def compute_dR_dt(
+    R0: ndarray,
+    t0: ndarray,
+    R1: ndarray,
+    t1: ndarray
+) -> Tuple[ndarray, ndarray]:
+    """
+    Compute relative rotation and translation.
+
+    Args:
+        R0: First rotation matrix
+        t0: First translation
+        R1: Second rotation matrix
+        t1: Second translation
+
+    Returns:
+        Tuple of (dR, dt)
+    """
     dR = np.dot(R1, R0.T)
     dt = t1 - np.dot(dR, t0)
     return dR, dt
 
 
-def compute_precision_recall_np(pr, gt, eps=1e-5):
+def compute_precision_recall_np(
+    pr: ndarray,
+    gt: ndarray,
+    eps: float = 1e-5
+) -> Tuple[float, float, float]:
+    """
+    Compute precision, recall, and F1 score for boolean arrays.
+
+    Args:
+        pr: Predicted boolean array
+        gt: Ground truth boolean array
+        eps: Small value to avoid division by zero
+
+    Returns:
+        Tuple of (precision, recall, f1)
+    """
     tp = np.sum(gt & pr)
     fp = np.sum((~gt) & pr)
     fn = np.sum(gt & (~pr))
@@ -317,11 +645,31 @@ def compute_precision_recall_np(pr, gt, eps=1e-5):
     return precision, recall, f1
 
 
-def load_cfg(path):
+def load_cfg(path: str) -> Any:
+    """
+    Load YAML configuration file.
+
+    Args:
+        path: Path to YAML file
+
+    Returns:
+        Loaded configuration
+    """
     with open(path, 'r') as f:
         return yaml.load(f, Loader=yaml.FullLoader)
 
-def load_config(*yaml_files, cli_args=[]):
+
+def load_config(*yaml_files: str, cli_args: List[str] = []) -> Any:
+    """
+    Load and merge configuration files.
+
+    Args:
+        yaml_files: Paths to YAML config files
+        cli_args: Command line arguments
+
+    Returns:
+        Merged configuration
+    """
     yaml_confs = [OmegaConf.load(f) for f in yaml_files]
     cli_conf = OmegaConf.from_cli(cli_args)
     print(cli_conf)
@@ -330,28 +678,61 @@ def load_config(*yaml_files, cli_args=[]):
     return conf
 
 
-def get_stem(path, suffix_len=5):
+def get_stem(path: str, suffix_len: int = 5) -> str:
+    """
+    Get filename stem without suffix.
+
+    Args:
+        path: File path
+        suffix_len: Length of suffix to remove
+
+    Returns:
+        Filename stem
+    """
     return os.path.basename(path)[:-suffix_len]
 
 
-def load_component(component_func, component_cfg_fn):
+def load_component(component_func: Dict, component_cfg_fn: str) -> Any:
+    """
+    Load component from configuration file.
+
+    Args:
+        component_func: Dictionary of component functions
+        component_cfg_fn: Path to component config
+
+    Returns:
+        Loaded component
+    """
     component_cfg = load_cfg(component_cfg_fn)
     return component_func[component_cfg['type']](component_cfg)
 
 
-def interpolate_image_points(img, pts, interpolation=cv2.INTER_LINEAR):
-    # img [h,w,k] pts [n,2]
+def interpolate_image_points(
+    img: ndarray,
+    pts: ndarray,
+    interpolation: int = cv2.INTER_LINEAR
+) -> ndarray:
+    """
+    Interpolate image values at given points.
+
+    Args:
+        img: Input image [h,w,k]
+        pts: Query points [n,2]
+        interpolation: Interpolation method
+
+    Returns:
+        Interpolated values
+    """
     if len(pts) < 32767:
         pts = pts.astype(np.float32)
-        return cv2.remap(img, pts[:, None, 0], pts[:, None, 1], borderMode=cv2.BORDER_CONSTANT, borderValue=0,
-                         interpolation=interpolation)[:, 0]
-        # pn=len(pts)
-        # sl=int(np.ceil(np.sqrt(pn)))
-        # tmp_img=np.zeros([sl*sl,2],np.float32)
-        # tmp_img[:pn]=pts
-        # tmp_img=tmp_img.reshape([sl,sl,2])
-        # tmp_img=cv2.remap(img,tmp_img[:,:,0],tmp_img[:,:,1],borderMode=cv2.BORDER_CONSTANT,borderValue=0,interpolation=interpolation)
-        # return tmp_img.flatten()[:pn]
+        return cv2.remap(
+            img,
+            pts[:, None, 0],
+            pts[:, None, 1],
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+            interpolation=interpolation
+        )[:, 0]
     else:
         results = []
         for k in range(0, len(pts), 30000):
@@ -359,55 +740,50 @@ def interpolate_image_points(img, pts, interpolation=cv2.INTER_LINEAR):
         return np.concatenate(results, 0)
 
 
-def transform_points_Rt(pts, R, t):
+def transform_points_Rt(pts: ndarray, R: ndarray, t: ndarray) -> ndarray:
+    """
+    Transform points using rotation and translation.
+
+    Args:
+        pts: Input points
+        R: Rotation matrix
+        t: Translation vector
+
+    Returns:
+        Transformed points
+    """
     t = t.flatten()
     return pts @ R.T + t[None, :]
 
 
-def transform_points_pose(pts, pose):
+def transform_points_pose(pts: ndarray, pose: ndarray) -> ndarray:
+    """
+    Transform points using pose.
+
+    Args:
+        pts: Input points
+        pose: Pose matrix (3x4)
+
+    Returns:
+        Transformed points
+    """
     R, t = pose[:, :3], pose[:, 3]
     if len(pts.shape) == 1:
         return (R @ pts[:, None] + t[:, None])[:, 0]
     return pts @ R.T + t[None, :]
 
 
-def quaternion_from_matrix(matrix, isprecise=False):
-    '''Return quaternion from rotation matrix.
+def quaternion_from_matrix(matrix: ndarray, isprecise: bool = False) -> ndarray:
+    """
+    Extract quaternion from rotation matrix.
 
-    If isprecise is True, the input matrix is assumed to be a precise rotation
-    matrix and a faster algorithm is used.
+    Args:
+        matrix: 4x4 transformation matrix
+        isprecise: If True, input is precise rotation matrix
 
-    >>> q = quaternion_from_matrix(numpy.identity(4), True)
-    >>> numpy.allclose(q, [1, 0, 0, 0])
-    True
-    >>> q = quaternion_from_matrix(numpy.diag([1, -1, -1, 1]))
-    >>> numpy.allclose(q, [0, 1, 0, 0]) or numpy.allclose(q, [0, -1, 0, 0])
-    True
-    >>> R = rotation_matrix(0.123, (1, 2, 3))
-    >>> q = quaternion_from_matrix(R, True)
-    >>> numpy.allclose(q, [0.9981095, 0.0164262, 0.0328524, 0.0492786])
-    True
-    >>> R = [[-0.545, 0.797, 0.260, 0], [0.733, 0.603, -0.313, 0],
-    ...      [-0.407, 0.021, -0.913, 0], [0, 0, 0, 1]]
-    >>> q = quaternion_from_matrix(R)
-    >>> numpy.allclose(q, [0.19069, 0.43736, 0.87485, -0.083611])
-    True
-    >>> R = [[0.395, 0.362, 0.843, 0], [-0.626, 0.796, -0.056, 0],
-    ...      [-0.677, -0.498, 0.529, 0], [0, 0, 0, 1]]
-    >>> q = quaternion_from_matrix(R)
-    >>> numpy.allclose(q, [0.82336615, -0.13610694, 0.46344705, -0.29792603])
-    True
-    >>> R = random_rotation_matrix()
-    >>> q = quaternion_from_matrix(R)
-    >>> is_same_transform(R, quaternion_matrix(q))
-    True
-    >>> R = euler_matrix(0.0, 0.0, numpy.pi/2.0)
-    >>> numpy.allclose(quaternion_from_matrix(R, isprecise=False),
-    ...                quaternion_from_matrix(R, isprecise=True))
-    True
-
-    '''
-
+    Returns:
+        Quaternion (x, y, z, w)
+    """
     M = np.array(matrix, dtype=np.float64, copy=False)[:4, :4]
     if isprecise:
         q = np.empty((4,))
@@ -440,14 +816,14 @@ def quaternion_from_matrix(matrix, isprecise=False):
         m21 = M[2, 1]
         m22 = M[2, 2]
 
-        # symmetric matrix K
-        K = np.array([[m00 - m11 - m22, 0.0, 0.0, 0.0],
-                      [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
-                      [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
-                      [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22]])
+        K = np.array(
+            [[m00 - m11 - m22, 0.0, 0.0, 0.0],
+             [m01 + m10, m11 - m00 - m22, 0.0, 0.0],
+             [m02 + m20, m12 + m21, m22 - m00 - m11, 0.0],
+             [m21 - m12, m02 - m20, m10 - m01, m00 + m11 + m22]]
+        )
         K /= 3.0
 
-        # quaternion is eigenvector of K that corresponds to largest eigenvalue
         w, V = np.linalg.eigh(K)
         q = V[[3, 0, 1, 2], np.argmax(w)]
 

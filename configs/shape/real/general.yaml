@@ -13,11 +13,18 @@ is_nerf: false
 vis_mask: false
 
 ######loss######
-loss: ['nerf_render','eikonal','std','init_sdf_reg','occ']
+loss: ['nerf_render','eikonal','std','init_sdf_reg','occ','planar']
 val_metric: ['shape_render']
 key_metric_name: psnr
 eikonal_weight: 0.1
 freeze_inv_s_step: 15000
+
+####planar loss config #####
+apply_planar_loss: true
+planar_K: 8
+planar_eta: 0.05
+planar_epsilon: 1e-3
+planar_loss_weight: 0.1
 
 ####dataset#####
 train_dataset_type: dummy

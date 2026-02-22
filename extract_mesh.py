@@ -1,22 +1,30 @@
+"""
+Mesh Extraction Script
+
+Extracts 3D mesh from trained neural network representation.
+"""
+
 import argparse
-
 from pathlib import Path
+from typing import Tuple
 
+import numpy as np
 import torch
 import trimesh
-from network.field import extract_geometry
 
+from network.field import extract_geometry
 from network.renderer import name2renderer
 from utils.base_utils import load_cfg, load_config
 
 
-def main():
+def main() -> None:
+    """Main mesh extraction function."""
     cfg = load_config(flags.cfg, cli_args=extras)
     network = name2renderer[cfg['network']](cfg, training=False)
 
     ckpt = torch.load(f'data/model/{cfg["name"]}/model.pth')
     step = ckpt['step']
-    network.load_state_dict(ckpt['network_state_dict'])
+    network.load_state_dict(ckpt['network_state_dict'], strict=False)
     network.eval().cuda()
     torch.set_default_tensor_type('torch.cuda.FloatTensor')
     print(f'successfully load {cfg["name"]} step {step}!')

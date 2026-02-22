@@ -1,39 +1,44 @@
 import numpy as np
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
 from network.field import SDFNetwork, NeRFNetwork
 
-class PlanarLoss(nn.Module):
+
+class Loss:
+    def __call__(self, data_pr, data_gt, step, **kwargs):
+        pass
+
+
+class PlanarLoss(Loss):
     """
-    Local Geometry-Constrained Regularization
+    Local Geometry-Constrained Regularization from HiNeuS paper
     """
     default_cfg = {
         "K": 8,             # Number of neighbors
         'eta': 0.05,        # Sampling radius
         'epsilon': 1e-3,    # Numerical stability
+        'planar_loss_weight': 0.1,  # Weight for planar loss
     }
 
-    def __init__(self, cfg, sdf_network: SDFNetwork, color_network: NeRFNetwork):
-        """
-        Args:
-            cfg: Configuration dictionary.
-            sdf_network: The active SDFNetwork instance.
-            color_network: The active NeRFNetwork instance.
-        """
-        super().__init__()
+    def __init__(self, cfg):
         self.cfg = {**self.default_cfg, **cfg}
-        
-        # Store references to the active network instances
-        self.sdf_network = sdf_network
-        self.color_network = color_network
 
-    def __call__(self, data_pr, data_gt, step, *args, **kwargs):
+    def __call__(self, data_pr, data_gt, step, sdf_network=None, color_network=None, *args, **kwargs):
         """
         Args:
-            data_pr: Dictionary containing predicted data. 
+            data_pr: Dictionary containing predicted data.
                      Requires 'inter_sdf', 'rays_o', 'rays_d'.
             data_gt: Dictionary containing ground truth.
             step: Current training step.
+            sdf_network: SDFNetwork instance (passed from trainer)
+            color_network: Color network instance (passed from trainer)
         """
+        if sdf_network is None or color_network is None:
+            # Planar loss needs access to networks - this is a registration stub
+            # The actual computation should be done in the renderer
+            return {}
+
         # Extract data
         # 'inter_sdf' presents the surface intersection point x0
         x0 = data_pr['inter_sdf']   # [B, 3]
@@ -43,14 +48,14 @@ class PlanarLoss(nn.Module):
         # Derive depth (t0) and normal (n0) from x0
         # We calculate these on-the-fly to ensure they correspond exactly to x0 (inter_sdf)
         # rather than using volume-rendered approximations that might exist in data_pr.
-        
+
         # t0 = projection of (x0 - ray_o) onto ray_v
         # Assuming ray_v is normalized
         t0 = torch.sum((x0 - ray_o) * ray_v, dim=-1, keepdim=True) # [B, 1]
 
         # n0 = Gradient of SDF at x0
         # We compute this explicitly to ensure we have the normal at the zero-crossing
-        n0 = self.sdf_network.gradient(x0)
+        n0 = sdf_network.gradient(x0)
         n0 = F.normalize(n0, dim=-1) # [B, 3]
 
         # Hyperparameters
@@ -63,84 +68,76 @@ class PlanarLoss(nn.Module):
 
         # Sample neighboring points, delta_t ~ uniform(-eta, 0)
         delta_t = torch.rand(batch_size, K, device=device) * (-eta)
-        
+
         # t_k = t0 + delta_t
         t_k = t0 + delta_t # [B, K]
-        
+
         # x_k = ray_o + t_k * ray_v
         # [B, K, 3]
         x_k = ray_o.unsqueeze(1) + t_k.unsqueeze(-1) * ray_v.unsqueeze(1)
         x_k_flat = x_k.reshape(-1, 3)
-        
+
         # Compute geometric planarity term
-        sdf_k, _ = self.sdf_network(x_k_flat)
-        
+        sdf_k, _ = sdf_network(x_k_flat)
+
         f_xk = sdf_k.reshape(batch_size, K) # [B, K]
-        
+
         # Prepare broadcasting for x0 and n0
         x0_expanded = x0.unsqueeze(1).expand(-1, K, -1) # [B, K, 3]
         n0_expanded = n0.unsqueeze(1).expand(-1, K, -1) # [B, K, 3]
-        
+
         # Distance ||x_k - x0||
         diff_vec = x_k - x0_expanded
         dist_k = torch.norm(diff_vec, dim=-1) + 1e-8
-        
+
         # Planarity error: | f(x_k)/dist - n0 . (x_k - x0)/dist |
         term_a = f_xk / dist_k
         term_b = torch.sum(n0_expanded * (diff_vec / dist_k.unsqueeze(-1)), dim=-1)
         planar_error = torch.abs(term_a - term_b) # [B, K]
 
         # Compute adaptive weighting: get features for neighbors x_k
-        feat_xk = self._get_radiance_features(x_k_flat) # [B*K, C]
+        feat_xk = self._get_radiance_features(x_k_flat, sdf_network, color_network) # [B*K, C]
         feat_xk = feat_xk.reshape(batch_size, K, -1)
-        
+
         # Get features for surface point x0
-        feat_x0 = self._get_radiance_features(x0) # [B, C]
+        feat_x0 = self._get_radiance_features(x0, sdf_network, color_network) # [B, C]
         feat_x0_expanded = feat_x0.unsqueeze(1).expand(-1, K, -1)
-        
+
         # Feature distance
         feat_diff = torch.norm(feat_xk - feat_x0_expanded, dim=-1) # [B, K]
-        
+
         # Calculate lambda
         # Detach to prevent optimizing features to minimize this weight
         lambda_pla_k = epsilon / (feat_diff + epsilon)
         lambda_pla_k = lambda_pla_k.detach()
-        
+
         # Loss aggregation
         loss_planar = torch.mean(lambda_pla_k * planar_error)
-        
-        # Average lambda per ray for Eikonal usage
-        lambda_pla_per_ray = torch.mean(lambda_pla_k, dim=1, keepdim=True)
-        
-        return loss_planar, lambda_pla_per_ray
 
-    def _get_radiance_features(self, x):
+        return {'loss_planar': loss_planar * self.cfg['planar_loss_weight']}
+
+    def _get_radiance_features(self, x, sdf_network, color_network):
         """
         Computes radiance features for points x.
         """
         # Enable gradients for normal calculation
         with torch.enable_grad():
             x = x.requires_grad_(True)
-            
+
             # Get SDF and geometry features: SDFNetwork.forward(x) -> (sdf, feat)
-            sdf, geo_feat = self.sdf_network(x)
+            sdf, geo_feat = sdf_network(x)
 
             # Compute gradients (normals)
-            gradients = self.sdf_network.gradient(x)
+            gradients = sdf_network.gradient(x)
             normals = F.normalize(gradients, dim=-1)
 
         # View direction assuming v_k follows the direction of the sdf gradient (normal)
         view_dirs = normals
 
         # Query color
-        features = self.color_network(x, normals, view_dirs, geo_feat)
-        
+        features = color_network(x, normals, view_dirs, geo_feat)
+
         return features
-
-
-class Loss:
-    def __call__(self, data_pr, data_gt, step, **kwargs):
-        pass
 
 
 class NeRFRenderLoss(Loss):
@@ -302,4 +299,5 @@ name2loss = {
     'mask': MaskLoss,
 
     'mat_reg': MaterialRegLoss,
+    'planar': PlanarLoss,  # HiNeuS Planar Loss for Local Geometry-Constrained Regularization
 }

@@ -1,7 +1,7 @@
 omegaconf
 tensorboardX
 numpy
-open3d==0.16.0
+open3d
 pymcubes
 plyfile
 h5py

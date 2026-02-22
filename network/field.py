@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch
 import numpy as np
 import nvdiffrast.torch as dr
-import mcubes
+from skimage.measure import marching_cubes
 
 from utils.base_utils import az_el_to_points, sample_sphere
 from utils.raw_utils import linear_to_srgb
@@ -1144,7 +1144,7 @@ def extract_fields(bound_min, bound_max, resolution, query_func, batch_size=64, 
 
 def extract_geometry(bound_min, bound_max, resolution, threshold, query_func, outside_val=1.0):
     u = extract_fields(bound_min, bound_max, resolution, query_func, outside_val=outside_val)
-    vertices, triangles = mcubes.marching_cubes(u, threshold)
+    vertices, triangles, _, _ = marching_cubes(u, level=threshold)
     b_max_np = bound_max.detach().cpu().numpy()
     b_min_np = bound_min.detach().cpu().numpy()
 

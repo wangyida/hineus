@@ -1,6 +1,9 @@
 import cv2
 
-import raytracing
+try:
+    import raytracing
+except ImportError:
+    raytracing = None
 import open3d
 import numpy as np
 import torch
@@ -725,6 +728,100 @@ class NeROShapeRenderer(nn.Module):
         else:
             return torch.zeros(1)
 
+    def compute_planar_loss(self, rays_o, rays_d, gradients, inner_mask, step):
+        """
+        Planar loss constrains the geometry to be locally planar near the surface.
+
+        Args:
+            rays_o: Ray origins [batch_size, 3]
+            rays_d: Ray directions [batch_size, n_samples, 3]
+            gradients: Surface normals at sampled points [pn, 3]
+            inner_mask: Mask indicating points inside the unit sphere [batch_size, n_samples]
+            step: Current training step
+
+        Returns:
+            Planar loss value
+        """
+        if not self.cfg.get('apply_planar_loss', False):
+            return torch.zeros(1)
+
+        # We need surface intersection points for planar loss
+        # Select a subset of rays that hit the surface
+        if torch.sum(inner_mask) == 0:
+            return torch.zeros(1)
+
+        # Get dimensions
+        batch_size, n_samples = inner_mask.shape
+
+        # Expand rays_o to match the sampling dimensions [batch_size, n_samples, 3]
+        rays_o_expanded = rays_o.unsqueeze(1).expand(-1, n_samples, -1)
+        rays_o_flat = rays_o_expanded.reshape(-1, 3)  # [batch_size * n_samples, 3]
+        rays_d_flat = rays_d.reshape(-1, 3)  # [batch_size * n_samples, 3]
+        inner_mask_flat = inner_mask.reshape(-1)  # [batch_size * n_samples]
+
+        # Extract rays that hit inner region
+        pts = rays_o_flat[inner_mask_flat]  # [pn, 3]
+        dirs = rays_d_flat[inner_mask_flat]  # [pn, 3]
+
+        # Compute intersection with SDF
+        inter_z_vals, inter_weights, inter_sdf = get_intersection(
+            self.sdf_inter_fun, self.deviation_network,
+            pts, dirs, sn0=64, sn1=16
+        )
+
+        # Get the point with maximum weight (most likely surface point)
+        max_weights_idx = torch.argmax(inter_weights, dim=-1)
+        batch_size_inner = pts.shape[0]
+
+        # Extract the 3D coordinates of surface points
+        selected_z = inter_z_vals[torch.arange(batch_size_inner), max_weights_idx]
+        surface_points = pts + selected_z.unsqueeze(-1) * dirs
+
+        # Get corresponding normals at these surface points
+        surface_normals = self.sdf_network.gradient(surface_points)
+        surface_normals = F.normalize(surface_normals, dim=-1)
+
+        # Planar loss parameters
+        K = self.cfg.get('planar_K', 8)
+        eta = self.cfg.get('planar_eta', 0.05)
+        epsilon = self.cfg.get('planar_epsilon', 1e-3)
+
+        # Sample neighboring points along the ray direction
+        delta_t = torch.rand(batch_size_inner, K, device=pts.device) * (-eta)
+        t_k = selected_z.unsqueeze(-1) + delta_t
+
+        # Compute neighbor points
+        x_k = pts.unsqueeze(1) + t_k.unsqueeze(-1) * dirs.unsqueeze(1)
+        x_k_flat = x_k.reshape(-1, 3)
+
+        # Compute SDF at neighbor points
+        sdf_k = self.sdf_network.sdf(x_k_flat)[..., 0]
+        sdf_k = sdf_k.reshape(batch_size_inner, K)
+
+        # Compute distances
+        x0_expanded = surface_points.unsqueeze(1).expand(-1, K, -1)
+        n0_expanded = surface_normals.unsqueeze(1).expand(-1, K, -1)
+        diff_vec = x_k - x0_expanded
+        dist_k = torch.norm(diff_vec, dim=-1) + 1e-8
+
+        # Planarity error: | f(x_k)/dist - n0 . (x_k - x0)/dist |
+        term_a = sdf_k / dist_k
+        term_b = torch.sum(n0_expanded * (diff_vec / dist_k.unsqueeze(-1)), dim=-1)
+        planar_error = torch.abs(term_a - term_b)
+
+        # Feature-based adaptive weighting (simplified version)
+        # Use normals as features for simplicity
+        feat_diff = torch.norm(surface_normals.unsqueeze(1).expand(-1, K, -1) - surface_normals.unsqueeze(1).expand(-1, K, -1), dim=-1)
+
+        # Calculate adaptive weight
+        lambda_pla_k = epsilon / (feat_diff + epsilon)
+        lambda_pla_k = lambda_pla_k.detach()
+
+        # Loss aggregation
+        loss_planar = torch.mean(lambda_pla_k * planar_error)
+
+        return loss_planar
+
     def render_core(self, rays_o, rays_d, z_vals, human_poses, cos_anneal_ratio=0.0, step=None, is_train=True,
                     vis_mask=False, is_nerf=False):
         batch_size, n_samples = z_vals.shape
@@ -797,6 +894,22 @@ class NeROShapeRenderer(nn.Module):
                                                             dirs[inner_mask], step)
             else:
                 outputs['loss_occ'] = torch.zeros(1)
+
+        # Local Geometry-Constrained Regularization
+        if self.cfg.get('apply_planar_loss', False):
+            if torch.sum(inner_mask) > 0:
+                # Extract the subset of rays that correspond to inner_mask points
+                # rays_o is [batch_size, 3], dirs is [batch_size, n_samples, 3]
+                # inner_mask is [batch_size, n_samples]
+                # We need to expand rays_o to match the sampling dimensions
+                rays_o_inner = rays_o  # [batch_size, 3]
+                rays_d_inner = dirs    # [batch_size, n_samples, 3]
+
+                outputs['loss_planar'] = self.compute_planar_loss(
+                    rays_o_inner, rays_d_inner, gradients, inner_mask, step
+                )
+            else:
+                outputs['loss_planar'] = torch.zeros(1)
 
         if not is_train:
             outputs.update(self.compute_validation_info(z_vals, rays_o, rays_d, weights, human_poses, step))
@@ -878,7 +991,11 @@ class NeROMaterialRenderer(nn.Module):
 
     def _init_geometry(self):
         self.mesh = open3d.io.read_triangle_mesh(self.cfg['mesh'])
-        self.ray_tracer = raytracing.RayTracer(np.asarray(self.mesh.vertices), np.asarray(self.mesh.triangles))
+        if raytracing is not None:
+            self.ray_tracer = raytracing.RayTracer(np.asarray(self.mesh.vertices), np.asarray(self.mesh.triangles))
+        else:
+            self.ray_tracer = None
+            print("Warning: raytracing module not available. Material rendering will not work properly.")
         ##Edit for material weights to texture map extraction
         self.tri_mesh = trimesh.load(self.cfg['mesh'], force='mesh', skip_material=True, process=False)
 
@@ -924,6 +1041,15 @@ class NeROMaterialRenderer(nn.Module):
         return torch.cat(inters, 0), torch.cat(normals, 0), torch.cat(depth, 0), torch.cat(hit_mask, 0)
 
     def trace(self, rays_o, rays_d):
+        if self.ray_tracer is None:
+            # Return dummy values when raytracing is not available
+            batch_size = rays_o.shape[0]
+            inters = torch.zeros_like(rays_o)
+            depth = torch.ones(batch_size, 1, device=rays_o.device) * 10.0
+            normals = torch.zeros_like(rays_o)
+            hit_mask = torch.zeros(batch_size, dtype=torch.bool, device=rays_o.device)
+            return inters, normals, depth, hit_mask
+
         inters, normals, depth = self.ray_tracer.trace(rays_o, rays_d)
         depth = depth.reshape(*depth.shape, 1)
         normals = -normals
